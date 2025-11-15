@@ -65,7 +65,6 @@ This system controls a robotic arm with three servo motors (shoulder, elbow, and
 
 ## Team Members
 
-1. [Aron Gu](https://github.com/arongu321)
-2. [Sami Jagirdar](https://github.com/Sami-Jagirdar)
-3. [Jared Drueco](https://github.com/jdrco)
-4. [Antonio Martin-Ozimek](https://github.com/antonio2uofa)
+1. Aaryan Waghmare
+2. Khush Kothari
+3. Tanvi Shinde
