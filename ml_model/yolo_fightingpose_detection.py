@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 from enum import Enum
+from copy import deepcopy
 import os
 import shutil
 
@@ -51,6 +52,29 @@ class ZonePoseDetector:
         # Simple temporal smoothing for angles (exponential moving average)
         self.prev_angles = None
         self.smoothing_alpha = 0.4  # 0 = no smoothing, 1 = immediate
+
+        # Discrete motion intent tracking (prevents accidental activations)
+        self.intent_confirmation_frames = 3
+        self.motion_state = {
+            "base": "CENTER",
+            "forward": "NEUTRAL",
+            "vertical": "NEUTRAL",
+            "grip": "HOLD",
+        }
+        self.motion_trackers = {
+            axis: {"candidate": state, "streak": self.intent_confirmation_frames}
+            for axis, state in self.motion_state.items()
+        }
+
+        # Thresholds for classifying discrete poses
+        self.base_left_thresh = 0.42
+        self.base_right_thresh = 0.58
+        self.forward_lower_thresh = 65.0   # degrees
+        self.forward_upper_thresh = 120.0  # degrees
+        self.vertical_up_thresh = 70.0     # degrees
+        self.vertical_down_thresh = 135.0  # degrees
+        self.grip_open_thresh = 55.0       # degrees
+        self.grip_close_thresh = 125.0     # degrees
         
     def initialize_model(self):
         """Initialize YOLO pose model"""
@@ -128,17 +152,27 @@ class ZonePoseDetector:
             frame: Input image frame (numpy array)
             
         Returns:
-            tuple: (annotated_frame, pose_type, angles)
+            tuple: (annotated_frame, pose_type, angles, keypoints, arm_side, motion_state)
                 - annotated_frame: Frame with drawn keypoints and skeleton
                 - pose_type: Detected PoseType enum
                 - angles: [shoulder_angle, elbow_angle, wrist_angle] in degrees
+                - keypoints: numpy array of keypoints (N x 3) or None
+                - arm_side: 'left' or 'right' (which arm was used)
+                - motion_state: dict describing discrete commands for each axis
         """
         try:
             # Run YOLO inference
             if self.model is None:
-                return frame, PoseType.UNKNOWN, (0, 0, 0)
+                motion_state = deepcopy(self.motion_state)
+                self._annotate_motion_state(frame, motion_state)
+                return frame, PoseType.UNKNOWN, (0, 0, 0), None, None, motion_state
             results = self.model(frame, verbose=False)
             annotated_frame = frame.copy()
+            h, w = frame.shape[:2]
+            wrist_x_norm = 0.5
+            # placeholders in case no keypoints are found
+            keypoints = None
+            arm_side = None
             
             # Default angles and pose
             shoulder_angle = 0
@@ -174,6 +208,16 @@ class ZonePoseDetector:
                         keypoints[elbow_idx][2] > self.conf_thresh and 
                         keypoints[wrist_idx][2] > self.conf_thresh):
                         
+                        # Track wrist/base horizontal position for base rotation intent
+                        base_source_idx = None
+                        if wrist_idx < len(keypoints) and keypoints[wrist_idx][2] > self.conf_thresh:
+                            base_source_idx = wrist_idx
+                        elif shoulder_idx < len(keypoints) and keypoints[shoulder_idx][2] > self.conf_thresh:
+                            base_source_idx = shoulder_idx
+                        if base_source_idx is not None and w > 0:
+                            base_x = float(np.clip(keypoints[base_source_idx][0], 0, w))
+                            wrist_x_norm = base_x / max(w, 1e-6)
+
                         # Calculate angles
                         hip_idx = self.LEFT_HIP if arm_side == 'left' else self.RIGHT_HIP
                         # Use detected hip if confident, otherwise estimate a point below the shoulder
@@ -226,8 +270,8 @@ class ZonePoseDetector:
                         else:
                             pose_type = PoseType.READY
                     
-                    # Draw skeleton
-                    self._draw_skeleton(annotated_frame, keypoints, arm_side)
+                        # Draw skeleton
+                        self._draw_skeleton(annotated_frame, keypoints, arm_side)
             
             # Add text with angle information
             cv2.putText(annotated_frame, f"Shoulder: {shoulder_angle:.1f}°", (10, 30),
@@ -238,13 +282,86 @@ class ZonePoseDetector:
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             cv2.putText(annotated_frame, f"Pose: {pose_type.value}", (10, 150),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+            motion_state = self._classify_motion(shoulder_angle, elbow_angle, wrist_angle, wrist_x_norm)
+            self._annotate_motion_state(annotated_frame, motion_state)
             
-            return annotated_frame, pose_type, (shoulder_angle, elbow_angle, wrist_angle)
+            return (
+                annotated_frame,
+                pose_type,
+                (shoulder_angle, elbow_angle, wrist_angle),
+                (keypoints if 'keypoints' in locals() else None),
+                (arm_side if 'arm_side' in locals() else None),
+                deepcopy(motion_state),
+            )
             
         except Exception as e:
             print(f"Error processing frame: {e}")
-            return frame, PoseType.UNKNOWN, (0, 0, 0)
+            motion_state = deepcopy(self.motion_state)
+            self._annotate_motion_state(frame, motion_state)
+            return frame, PoseType.UNKNOWN, (0, 0, 0), None, None, motion_state
     
+    def _classify_motion(self, shoulder_angle, elbow_angle, wrist_angle, wrist_x_norm):
+        """
+        Convert continuous angles into discrete motion states with hysteresis.
+        This reduces accidental activations caused by single-frame noise.
+        """
+        candidate = {}
+
+        if wrist_x_norm < self.base_left_thresh:
+            candidate["base"] = "LEFT"
+        elif wrist_x_norm > self.base_right_thresh:
+            candidate["base"] = "RIGHT"
+        else:
+            candidate["base"] = "CENTER"
+
+        if shoulder_angle <= self.forward_lower_thresh:
+            candidate["forward"] = "BACKWARD"
+        elif shoulder_angle >= self.forward_upper_thresh:
+            candidate["forward"] = "FORWARD"
+        else:
+            candidate["forward"] = "NEUTRAL"
+
+        if elbow_angle <= self.vertical_up_thresh:
+            candidate["vertical"] = "UP"
+        elif elbow_angle >= self.vertical_down_thresh:
+            candidate["vertical"] = "DOWN"
+        else:
+            candidate["vertical"] = "NEUTRAL"
+
+        if wrist_angle <= self.grip_open_thresh:
+            candidate["grip"] = "OPEN"
+        elif wrist_angle >= self.grip_close_thresh:
+            candidate["grip"] = "CLOSE"
+        else:
+            candidate["grip"] = "HOLD"
+
+        for axis, intent in candidate.items():
+            tracker = self.motion_trackers[axis]
+            if intent == tracker["candidate"]:
+                tracker["streak"] = min(self.intent_confirmation_frames, tracker["streak"] + 1)
+            else:
+                tracker["candidate"] = intent
+                tracker["streak"] = 1
+
+            if tracker["streak"] >= self.intent_confirmation_frames:
+                self.motion_state[axis] = tracker["candidate"]
+
+        return self.motion_state
+
+    def _annotate_motion_state(self, frame, motion_state):
+        """Overlay discrete motion state on the frame."""
+        if frame is None or motion_state is None:
+            return
+        cv2.putText(frame, f"Base: {motion_state['base']}", (10, 190),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2)
+        cv2.putText(frame, f"Forward/Back: {motion_state['forward']}", (10, 220),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2)
+        cv2.putText(frame, f"Up/Down: {motion_state['vertical']}", (10, 250),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2)
+        cv2.putText(frame, f"Grip: {motion_state['grip']}", (10, 280),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2)
+
     def _draw_skeleton(self, frame, keypoints, arm_side='right'):
         """
         Draw pose skeleton on frame

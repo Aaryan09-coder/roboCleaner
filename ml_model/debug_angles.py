@@ -20,7 +20,7 @@ try:
             break
         frame_count += 1
         try:
-            annotated, pose, angles = detector.process_frame(frame)
+            annotated, pose, angles, *_ = detector.process_frame(frame)
         except Exception as e:
             print('process_frame error:', e)
             break

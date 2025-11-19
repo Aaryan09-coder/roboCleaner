@@ -102,7 +102,7 @@ def main():
                 
                 # Process frame
                 try:
-                    annotated_frame, pose, angles = detector.process_frame(frame)
+                    annotated_frame, pose, angles, *_ = detector.process_frame(frame)
                 except Exception as e:
                     print(f"ERROR in process_frame: {e}")
                     continue
