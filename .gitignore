@@ -1,5 +1,11 @@
-# *.pt
-*.csv
-*.mp4
-*.DS_Store
-*__pycache__/
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+venv/
+.env/
+env/
+.venv/
