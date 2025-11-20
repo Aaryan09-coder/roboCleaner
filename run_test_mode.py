@@ -17,6 +17,21 @@ except Exception:
     mp = None
     _HAS_MEDIAPIPE = False
 
+# Helper to safely display pose values
+def safe_pose_label(pose):
+    try:
+        if pose is None:
+            return "UNKNOWN"
+        if hasattr(pose, "value"):
+            label = pose.value
+        else:
+            label = pose
+        if label is None:
+            return "UNKNOWN"
+        return str(label)
+    except Exception:
+        return "UNKNOWN"
+
 print("="*60)
 print("Nuclear Waste Cleaning Arm - Test Mode")
 print("="*60)
@@ -123,7 +138,8 @@ try:
         
         if pose and pose != current_pose:
             current_pose = pose
-            print(f"Pose: {pose.value} | Shoulder: {shoulder_angle:.1f}° | Elbow: {elbow_angle:.1f}° | Wrist: {wrist_angle:.1f}° | Grip: {grip_angle}° | Motion: {motion_state}")
+            pose_label = safe_pose_label(pose)
+            print(f"Pose: {pose_label} | Shoulder: {shoulder_angle:.1f}° | Elbow: {elbow_angle:.1f}° | Wrist: {wrist_angle:.1f}° | Grip: {grip_angle}° | Motion: {motion_state}")
         
         cv2.imshow("Nuclear Waste Cleaning Arm Control", annotated_frame)
         

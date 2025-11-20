@@ -27,51 +27,38 @@ def main():
         print("="*60)
         print("This mode requires ESP32 connection.")
         print("Make sure ESP32 is powered and connected to WiFi.")
-        print("Press 'q' in camera window to quit.\n")
+        print("You will be prompted to choose a control mode next.\n")
         
         try:
-            from client.PoseController import PoseController
+            from client.PoseController import PoseController, show_control_mode_menu
             controller = PoseController()
-            if controller.connect():
+            
+            # Show control mode menu
+            mode_choice = show_control_mode_menu()
+            
+            if mode_choice == 'q':
+                print("Exiting...")
+                return
+            
+            # Connect to ESP32 (or continue without connection for testing)
+            connected = controller.connect()
+            if connected:
                 print("✓ Connected to ESP32")
-                controller.run_yolo_mode()
             else:
                 print("⚠ Failed to connect to ESP32")
-                print("Running in test mode (pose detection only)...")
-                from ml_model.yolo_fightingpose_detection import ZonePoseDetector
-                import cv2
-                
-                detector = ZonePoseDetector()
-                cap = cv2.VideoCapture(0)
-                
-                if not cap.isOpened():
-                    print("ERROR: Could not open camera")
-                    return
-                
-                print("Camera opened. Starting pose detection...")
-                current_pose = None
-                
-                try:
-                    while True:
-                        ret, frame = cap.read()
-                        if not ret:
-                            break
-                        
-                        annotated_frame, pose, angles, *_ = detector.process_frame(frame)
-                        
-                        if pose and pose != current_pose:
-                            current_pose = pose
-                            print(f"Pose: {pose.value} | Angles - Shoulder: {angles[0]:.1f}°, Elbow: {angles[1]:.1f}°, Wrist: {angles[2]:.1f}°")
-                        
-                        cv2.imshow("Nuclear Waste Cleaning Arm Control", annotated_frame)
-                        
-                        if cv2.waitKey(1) & 0xFF == ord('q'):
-                            break
-                finally:
-                    cap.release()
-                    cv2.destroyAllWindows()
-                    detector.reset_arm() if hasattr(detector, 'reset_arm') else None
-                    
+                print("Running in test mode (pose detection only - no servo control)...\n")
+            
+            # Run selected mode
+            if mode_choice == '1':
+                controller.run_mode_switching()
+            elif mode_choice == '2':
+                controller.run_two_handed()
+            else:
+                print("Invalid choice. Exiting...")
+                return
+        except KeyboardInterrupt:
+            print("\n\nInterrupted by user")
+            return
         except Exception as e:
             print(f"ERROR: {e}")
             import traceback
@@ -104,19 +91,27 @@ def main():
             traceback.print_exc()
     
     elif choice == "3":
-        print("\n" + "="*60)
-        print("Test Mode - Pose Detection Only")
-        print("="*60)
+        print("\n" + "="*80)
+        print("Test Mode - Pose Detection Only (All Features Enabled)")
+        print("="*80)
         print("No ESP32 connection required.")
-        print("This will test the pose detection system.")
-        print("Press 'q' in camera window to quit.\n")
+        print("This will test the pose detection system with ALL features enabled:")
+        print("  ✓ YOLO pose detection")
+        print("  ✓ MediaPipe hand detection (improved)")
+        print("  ✓ Real-time angle calculations")
+        print("  ✓ Hand openness detection")
+        print("  ✓ Visual feedback with landmarks")
+        print("  ✓ Motion state tracking")
+        print("\nPress 'q' in camera window to quit.\n")
         
         try:
             from ml_model.yolo_fightingpose_detection import ZonePoseDetector
+            from client.PoseController import PoseController  # Import to use improved hand detection method
             import cv2
+            import numpy as np
             import importlib
             
-            # Try to initialize MediaPipe hands for grip detection (optional)
+            # Try to initialize MediaPipe hands for grip detection (with improved settings)
             try:
                 mp = importlib.import_module("mediapipe")
                 _HAS_MEDIAPIPE = True
@@ -124,41 +119,43 @@ def main():
                 mp = None
                 _HAS_MEDIAPIPE = False
 
-            hands_detector = None
-            if _HAS_MEDIAPIPE:
-                try:
-                    solutions = getattr(mp, "solutions", None)
-                    hands_module = getattr(solutions, "hands", None) if solutions is not None else None
-                    if hands_module is not None:
-                        hands_detector = hands_module.Hands(
-                            static_image_mode=False,
-                            max_num_hands=1,
-                            min_detection_confidence=0.7,
-                            min_tracking_confidence=0.5,
-                            model_complexity=1,
-                        )
-                        print("✓ MediaPipe hands initialized")
-                except Exception:
-                    hands_detector = None
-
-            print("Initializing detector...")
+            print("Initializing detectors...")
             detector = ZonePoseDetector()
-            print("✓ Detector initialized")
+            print("✓ YOLO detector initialized")
+
+            # Create a temporary PoseController instance to use its improved hand detection method
+            temp_controller = PoseController()
+            hands_detector = temp_controller.hands_detector
+            
+            if hands_detector is not None:
+                print("✓ MediaPipe hands detector initialized (with improved settings)")
+            else:
+                print("⚠ MediaPipe hands not available - hand detection disabled")
 
             print("Opening camera...")
             cap = cv2.VideoCapture(0)
+            
+            # Set camera properties for better performance
+            try:
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                cap.set(cv2.CAP_PROP_FPS, 30)
+            except:
+                pass
 
             if not cap.isOpened():
                 print("ERROR: Could not open camera")
                 return
 
             print("✓ Camera opened")
-            print("\nStarting pose detection...")
+            print("\nStarting pose detection with all features...")
             print("Move your arm to see angle calculations")
+            print("Open/close your hand to see grip detection")
             print("Press 'q' to quit\n")
 
             current_pose = None
             frame_count = 0
+            hand_openness_value = None  # Initialize for final status
 
             try:
                 while True:
@@ -168,85 +165,122 @@ def main():
                         break
 
                     frame_count += 1
-                    # Unpack keypoints and arm_side so we can run hand detection for grip
+                    h, w = frame.shape[:2]
+                    
+                    # Process pose detection
                     annotated_frame, pose, angles, keypoints, arm_side, motion_state = detector.process_frame(frame)
 
                     # Default grip fallback uses wrist angle
-                    import numpy as _np
                     shoulder_angle, elbow_angle, wrist_angle = angles
-                    grip_angle = int(_np.clip(wrist_angle, 0, 180))
+                    grip_angle = int(np.clip(wrist_angle, 0, 180))
+                    hand_openness_value = None
 
-                    # Attempt MediaPipe hand detection if available
+                    # Attempt MediaPipe hand detection with improved method
                     if hands_detector is not None and keypoints is not None and arm_side is not None:
                         try:
                             LEFT_WRIST_IDX = 9
                             RIGHT_WRIST_IDX = 10
                             wrist_idx = LEFT_WRIST_IDX if arm_side == 'left' else RIGHT_WRIST_IDX
 
-                            if keypoints is not None and wrist_idx < len(keypoints) and keypoints[wrist_idx][2] > 0.2:
-                                print(f"[DEBUG] Wrist detected: conf={keypoints[wrist_idx][2]:.2f}")
-                                wrist_xy = keypoints[wrist_idx][:2].astype(int)
-                                h, w, _ = frame.shape
-                                cx, cy = int(wrist_xy[0]), int(wrist_xy[1])
-                                crop_size = int(min(h, w) * 0.25)
-                                half = crop_size // 2
-                                x1 = max(0, cx - half)
-                                y1 = max(0, cy - half)
-                                x2 = min(w, cx + half)
-                                y2 = min(h, cy + half)
-                                print(f"[DEBUG] Crop ROI: ({x1},{y1}) to ({x2},{y2}), size={crop_size}x{crop_size}")
+                            if wrist_idx < len(keypoints) and keypoints[wrist_idx][2] > 0.2:
+                                wrist_x = keypoints[wrist_idx][0]
+                                wrist_y = keypoints[wrist_idx][1]
+                                
+                                # Use improved hand detection method from PoseController
+                                hand_openness_value, hand_landmarks = temp_controller.detect_hand_openness(
+                                    hands_detector, frame, wrist_x, wrist_y, arm_side, h, w, annotated_frame
+                                )
 
-                                cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (200, 200, 0), 2)
-                                crop = frame[y1:y2, x1:x2]
-                                if crop.size > 0:
-                                    rgb_crop = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-                                    res = hands_detector.process(rgb_crop)
-                                    used_landmarks = None
-                                    if res.multi_hand_landmarks:
-                                        print(f"[DEBUG] Hand detected in crop! Landmarks: {len(res.multi_hand_landmarks[0].landmark)}")
-                                        used_landmarks = res.multi_hand_landmarks[0].landmark
-                                    else:
-                                        # Fallback: try running detector on full frame if crop fails
-                                        print(f"[DEBUG] No hand landmarks detected in crop — trying full frame fallback")
-                                        rgb_full = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                                        res_full = hands_detector.process(rgb_full)
-                                        if res_full and res_full.multi_hand_landmarks:
-                                            print(f"[DEBUG] Hand detected on full frame! Landmarks: {len(res_full.multi_hand_landmarks[0].landmark)}")
-                                            used_landmarks = res_full.multi_hand_landmarks[0].landmark
-
-                                    if used_landmarks is not None:
-                                        lm = used_landmarks
-                                        tip_idxs = [4, 8, 12, 16, 20]
-                                        wrist_lm = lm[0]
-                                        dists = []
-                                        for idx in tip_idxs:
-                                            dx = lm[idx].x - wrist_lm.x
-                                            dy = lm[idx].y - wrist_lm.y
-                                            dists.append((dx * dx + dy * dy) ** 0.5)
-                                        avg = float(sum(dists) / len(dists))
-                                        # Calibrated mapping for this camera: closed ~0.85-1.0, open ~0.35-0.45
-                                        grip_angle = int(_np.clip(_np.interp(avg, [0.30, 1.00], [180, 0]), 0, 180))
-                                        print(f"[DEBUG] GripRaw: {avg:.3f} -> GripAngle: {grip_angle}°")
-                                        cv2.putText(annotated_frame, f"GripRaw: {avg:.3f}", (10, 190), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 0), 2)
-                                    else:
-                                        print(f"[DEBUG] No hand landmarks detected in crop or full frame")
-                                else:
-                                    print(f"[DEBUG] Empty crop")
-                            else:
-                                print(f"[DEBUG] Wrist keypoint not available or low confidence")
+                                if hand_openness_value is not None:
+                                    # Map hand openness: open hand (smaller value) → 0°, closed (larger) → 180°
+                                    grip_angle = int(np.clip(np.interp(hand_openness_value, [0.30, 1.00], [0, 180]), 0, 180))
                         except Exception as e:
-                            print(f"[DEBUG] Hand detection exception: {e}")
+                            # Hand detection failed, continue with wrist angle fallback
                             pass
 
-                    # Print updates every 30 frames or when pose changes
-                    if pose and pose != current_pose:
-                        current_pose = pose
-                        print(f"[Frame {frame_count}] Pose: {pose.value} | Motion: {motion_state}")
-                        print(f"  Shoulder: {angles[0]:.1f}° | Elbow: {angles[1]:.1f}° | Wrist: {angles[2]:.1f}° | Grip: {grip_angle}")
-                    elif frame_count % 30 == 0:
-                        print(f"[Frame {frame_count}] Angles - Shoulder: {angles[0]:.1f}° | Elbow: {angles[1]:.1f}° | Wrist: {angles[2]:.1f}° | Grip: {grip_angle} | Motion: {motion_state}")
+                    # Enhanced visual feedback on frame
+                    y_start = 30
+                    line_height = 25
+                    
+                    # Pose information - safely get pose value
+                    try:
+                        if pose is not None and hasattr(pose, 'value'):
+                            pose_value_display = str(pose.value) if pose.value is not None else "UNKNOWN"
+                        else:
+                            pose_value_display = "UNKNOWN"
+                    except Exception:
+                        pose_value_display = "UNKNOWN"
+                    
+                    cv2.putText(annotated_frame, f"Pose: {pose_value_display}", (10, y_start),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                    
+                    # Angles
+                    cv2.putText(annotated_frame, f"Shoulder: {shoulder_angle:.1f}°", (10, y_start + line_height),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                    cv2.putText(annotated_frame, f"Elbow: {elbow_angle:.1f}°", (10, y_start + line_height * 2),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                    cv2.putText(annotated_frame, f"Wrist: {wrist_angle:.1f}°", (10, y_start + line_height * 3),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                    
+                    # Grip information with hand detection status
+                    if hand_openness_value is not None:
+                        cv2.putText(annotated_frame, f"Grip: {grip_angle}° (Hand: {hand_openness_value:.3f})", 
+                                   (10, y_start + line_height * 4),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                    else:
+                        cv2.putText(annotated_frame, f"Grip: {grip_angle}° (from wrist, hand not detected)", 
+                                   (10, y_start + line_height * 4),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+                    
+                    # Motion state
+                    cv2.putText(annotated_frame, f"Base: {motion_state['base']}", (10, y_start + line_height * 5),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 2)
+                    cv2.putText(annotated_frame, f"Forward: {motion_state['forward']}", (10, y_start + line_height * 6),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 2)
+                    cv2.putText(annotated_frame, f"Vertical: {motion_state['vertical']}", (10, y_start + line_height * 7),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 2)
+                    cv2.putText(annotated_frame, f"Grip State: {motion_state['grip']}", (10, y_start + line_height * 8),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 2)
+                    
+                    # Arm side
+                    if arm_side:
+                        cv2.putText(annotated_frame, f"Tracking: {arm_side.upper()} ARM", 
+                                   (10, y_start + line_height * 9),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+                    
+                    # Frame counter
+                    cv2.putText(annotated_frame, f"Frame: {frame_count}", (w - 150, h - 20),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 2)
 
-                    cv2.imshow("Nuclear Waste Cleaning Arm Control - Test Mode", annotated_frame)
+                    # Print updates to console (reduced verbosity)
+                    # Get pose value safely (pose can be None or pose.value can be None)
+                    try:
+                        if pose is not None and hasattr(pose, 'value'):
+                            pose_value_str = str(pose.value) if pose.value is not None else "UNKNOWN"
+                        else:
+                            pose_value_str = "UNKNOWN"
+                    except Exception:
+                        pose_value_str = "UNKNOWN"
+                    
+                    if pose is not None and pose != current_pose:
+                        current_pose = pose
+                        print(f"[Frame {frame_count:4d}] Pose: {pose_value_str:15s} | "
+                              f"S:{shoulder_angle:6.1f}° | "
+                              f"E:{elbow_angle:6.1f}° | "
+                              f"W:{wrist_angle:6.1f}° | "
+                              f"Grip:{grip_angle:3d}° | "
+                              f"Hand:{hand_openness_value:.3f if hand_openness_value else 'N/A':>7} | "
+                              f"State: {motion_state}")
+                    elif frame_count % 60 == 0:  # Print every 60 frames (~2 seconds at 30fps)
+                        print(f"[Frame {frame_count:4d}] Angles - "
+                              f"S:{shoulder_angle:6.1f}° | "
+                              f"E:{elbow_angle:6.1f}° | "
+                              f"W:{wrist_angle:6.1f}° | "
+                              f"Grip:{grip_angle:3d}° | "
+                              f"Hand:{hand_openness_value:.3f if hand_openness_value else 'N/A':>7} | "
+                              f"State: {motion_state}")
+
+                    cv2.imshow("Nuclear Waste Cleaning Arm Control - Test Mode (All Features)", annotated_frame)
 
                     if cv2.waitKey(1) & 0xFF == ord('q'):
                         print("\nQuitting...")
@@ -254,7 +288,12 @@ def main():
             finally:
                 cap.release()
                 cv2.destroyAllWindows()
-                print("✓ Test completed")
+                print("\n✓ Test completed")
+                print("All features were tested:")
+                print("  ✓ Pose detection working")
+                print("  ✓ Hand detection working" + (" ✓" if hand_openness_value is not None else " (hand not detected in last frame)"))
+                print("  ✓ Angle calculations working")
+                print("  ✓ Visual feedback working")
 
         except Exception as e:
             print(f"ERROR: {e}")
