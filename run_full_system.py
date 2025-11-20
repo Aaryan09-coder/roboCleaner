@@ -17,7 +17,8 @@ def main():
     print("1. Pose Detection Only (YOLO mode - camera control)")
     print("2. Keyboard Control Mode")
     print("3. Test Pose Detection (no ESP32 connection)")
-    print("4. Exit")
+    print("4. New Controller (controller.py - ML→ESP32 direct mapping)")
+    print("5. Exit")
     
     choice = input("\nEnter choice (1-4): ").strip()
     
@@ -301,11 +302,36 @@ def main():
             traceback.print_exc()
     
     elif choice == "4":
+        print("\n" + "="*80)
+        print("New Controller Mode - ML Model → ESP32 Direct Mapping")
+        print("="*80)
+        print("This mode uses controller.py which directly maps ML model output")
+        print("(motion_state) to ESP32 servo commands via binary protocol.")
+        print("\nRequirements:")
+        print("  - ESP32 must be in AP mode (SSID: ESP32_AP, password: 12345678)")
+        print("  - ESP32 IP: 192.168.4.1, Port: 8080")
+        print("  - Connect your PC to ESP32_AP network")
+        print("  - ESP32 firmware must be the new version (main.cpp with 4-servo support)")
+        print("\nPress 'q' in camera window to quit.\n")
+        
+        try:
+            # Import and run the new controller
+            from controller import main as controller_main
+            controller_main()
+        except ImportError as e:
+            print(f"ERROR: Could not import controller.py: {e}")
+            print("Make sure controller.py exists in the repository root.")
+        except Exception as e:
+            print(f"ERROR: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    elif choice == "5":
         print("Exiting...")
         return
     
     else:
-        print("Invalid choice. Please run again and select 1-4.")
+        print("Invalid choice. Please run again and select 1-5.")
 
 if __name__ == "__main__":
     try:
